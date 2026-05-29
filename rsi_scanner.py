@@ -88,11 +88,11 @@ def fix_cols(df):
     return df
 
 def calc_rsi(closes, period=RSI_PERIOD):
-    delta = closes.diff()
-    gain  = delta.clip(lower=0).rolling(period).mean()
-    loss  = (-delta.clip(upper=0)).rolling(period).mean()
-    rs    = gain / loss.replace(0, np.nan)
-    return 100 - 100 / (1 + rs)
+    # Wilder's smoothing (EMA with com=period-1) — matches TradingView's RSI exactly
+    delta    = closes.diff()
+    avg_gain = delta.clip(lower=0).ewm(com=period - 1, min_periods=period).mean()
+    avg_loss = (-delta.clip(upper=0)).ewm(com=period - 1, min_periods=period).mean()
+    return 100 - 100 / (1 + avg_gain / avg_loss.replace(0, np.nan))
 
 def realized_vol(closes, window=30):
     return np.log(closes / closes.shift(1)).dropna().rolling(window).std() * np.sqrt(252)
