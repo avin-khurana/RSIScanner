@@ -1,0 +1,41 @@
+name: RSI Oversold Scanner
+
+on:
+  schedule:
+    # 22:00 UTC = 4:00 PM CST (UTC-6) on weekdays
+    # During CDT (summer, UTC-5): fires at 5 PM CDT — still after 4 PM ET market close
+    - cron: '0 22 * * 1-5'
+  workflow_dispatch:   # manual trigger from Actions UI
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run RSI scanner
+        env:
+          EMAIL_FROM:         ${{ secrets.EMAIL_FROM }}
+          EMAIL_APP_PASSWORD: ${{ secrets.EMAIL_APP_PASSWORD }}
+          EMAIL_TO:           avin.khurana18@gmail.com
+        run: python rsi_scanner.py
+
+      - name: Upload scan results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rsi-scan-${{ github.run_id }}
+          path: rsi_scan_results.csv
+          retention-days: 30
