@@ -140,6 +140,41 @@ def find_strike_for_delta(S, target_delta, T, r, sigma):
             hi = mid
     return round(mid / 5) * 5
 
+def iv_rank_tier(rank):
+    """Returns (label, hex_color, guidance) for an IV Rank value."""
+    if rank < 20:
+        return "IDEAL BUY",   "#3fb950", "IV near 52-wk low — cheapest options of the year"
+    if rank < 40:
+        return "GOOD",        "#56d364", "IV below average — favorable for buying"
+    if rank < 60:
+        return "FAIR",        "#d29922", "IV near average — neutral entry"
+    if rank < 80:
+        return "ABOVE AVG",   "#e3a341", "IV above average — consider spreads over naked longs"
+    return     "EXPENSIVE",   "#f85149", "IV near 52-wk high — poor time to buy naked options"
+
+def implied_vol(S, K, T, r, market_price, max_iter=100, tol=1e-6):
+    """Newton-Raphson IV solver: finds sigma such that BS_call(sigma) == market_price."""
+    if market_price <= 0 or T <= 0 or S <= 0 or K <= 0:
+        return None
+    intrinsic = max(S - K * np.exp(-r * T), 0.0)
+    if market_price < intrinsic - 0.01:
+        return None
+    sigma = 0.30
+    for _ in range(max_iter):
+        g = bs_greeks(S, K, T, r, sigma)
+        if g is None:
+            return None
+        diff = g['price'] - market_price
+        if abs(diff) < tol:
+            return sigma
+        raw_vega = g['vega'] * 100  # bs_greeks stores vega per 1% IV; convert to per-unit-sigma
+        if raw_vega < 1e-8:
+            break
+        sigma -= diff / raw_vega
+        sigma = max(1e-4, min(sigma, 20.0))
+    g = bs_greeks(S, K, T, r, sigma)
+    return sigma if (g and abs(g['price'] - market_price) < 0.10) else None
+
 
 # ─── LEAPS IV ────────────────────────────────────────────────────────────────
 def get_leaps_itm(ticker_obj, price, curr_iv):
@@ -166,14 +201,20 @@ def get_leaps_itm(ticker_obj, price, curr_iv):
         T = (datetime.strptime(best_exp, '%Y-%m-%d') - today).days / 365
 
         calls = ticker_obj.option_chain(best_exp).calls.copy()
-        # ITM: strike < price
-        calls = calls[calls['strike'] < price].dropna(subset=['strike', 'impliedVolatility'])
+        # ITM: strike < price; keep rows even when Yahoo's impliedVolatility is NaN/0
+        calls = calls[calls['strike'] < price].dropna(subset=['strike'])
+        calls = calls[calls['strike'] > 0]
         if calls.empty:
             return None, best_exp, T
 
         calls['bs_delta'] = calls.apply(
             lambda row: (
-                bs_greeks(price, row['strike'], T, RISK_FREE_RATE, row['impliedVolatility']) or {}
+                bs_greeks(
+                    price, row['strike'], T, RISK_FREE_RATE,
+                    row['impliedVolatility']
+                    if pd.notna(row.get('impliedVolatility')) and row['impliedVolatility'] > 0
+                    else curr_iv,
+                ) or {}
             ).get('delta', 0),
             axis=1,
         )
@@ -225,14 +266,24 @@ def scan_ticker(ticker, mcap):
             t_obj = yf.Ticker(ticker)
             chain_row, exp_date, T = get_leaps_itm(t_obj, price, curr_iv)
 
-            if chain_row is not None and not pd.isna(chain_row.get('impliedVolatility', np.nan)):
-                chain_iv = float(chain_row['impliedVolatility'])
-                strike   = float(chain_row['strike'])
-                bid      = float(chain_row.get('bid', 0))
-                ask      = float(chain_row.get('ask', 0))
-                mid      = (bid + ask) / 2
-                prem     = mid if mid > 0 else float(chain_row.get('lastPrice', 0))
-                greeks   = bs_greeks(price, strike, T, RISK_FREE_RATE, chain_iv)
+            if chain_row is not None:
+                strike    = float(chain_row['strike'])
+                bid       = float(chain_row.get('bid') or 0)
+                ask       = float(chain_row.get('ask') or 0)
+                mid       = (bid + ask) / 2
+                last      = float(chain_row.get('lastPrice') or 0)
+                prem      = mid if mid > 0 else last
+
+                # Prefer IV back-solved from market price; fall back to Yahoo's field, then realized vol
+                yahoo_iv  = float(chain_row.get('impliedVolatility') or 0)
+                solved_iv = implied_vol(price, strike, T, RISK_FREE_RATE, prem) if prem > 0 else None
+                chain_iv  = solved_iv or (yahoo_iv if yahoo_iv > 0 else curr_iv)
+
+                greeks = bs_greeks(price, strike, T, RISK_FREE_RATE, chain_iv)
+                if prem <= 0 and greeks:
+                    prem = greeks['price']
+                if prem <= 0:
+                    prem = curr_iv * 0.40 * price
             else:
                 T        = T or 1.0
                 chain_iv = curr_iv
@@ -315,15 +366,17 @@ def build_email_html(signals, all_valid, mcap_map, run_date):
     else:
         cards_html = ""
         for r in sorted(signals, key=lambda x: x['rsi']):
-            mcap_b        = mcap_map.get(r['ticker'], 0) / 1e9
-            iv_rank_color = "#3fb950" if r['iv_rank'] < 40 else ("#d29922" if r['iv_rank'] < 70 else "#f85149")
+            mcap_b                        = mcap_map.get(r['ticker'], 0) / 1e9
+            tier_label, tier_color, tier_guidance = iv_rank_tier(r['iv_rank'])
+            iv_rank_color                 = tier_color
 
             if r.get('leaps_strike'):
-                # IV Rank color: green = cheap, red = expensive
                 iv_rank_label = (
-                    f'<b style="color:{iv_rank_color}">{r["iv_rank"]:.0f}/100</b>'
-                    f'<span style="color:#8b949e;font-size:11px"> '
-                    f'(cheaper than {100-r["iv_rank"]:.0f}% of past year)</span>'
+                    f'<b style="color:{tier_color}">{r["iv_rank"]:.0f}/100 — {tier_label}</b>'
+                    f'<br><span style="color:#8b949e;font-size:11px">{tier_guidance}</span>'
+                    f'<br><span style="color:#8b949e;font-size:11px">'
+                    f'Ideal: &lt;20 &nbsp;·&nbsp; Good: 20–40 &nbsp;·&nbsp; '
+                    f'Fair: 40–60 &nbsp;·&nbsp; Above avg: 60–80 &nbsp;·&nbsp; Expensive: &gt;80</span>'
                 )
                 iv_expand_str = (
                     f' &nbsp;·&nbsp; <b style="color:#3fb950">+{r["iv_expand_gain"]:.0f}% option gain '
@@ -438,6 +491,10 @@ def build_email_html(signals, all_valid, mcap_map, run_date):
             color = "#f85149" if v < RSI_THRESHOLD else ("#d29922" if v < 35 else "#c9d1d9")
             return f'<span style="color:{color}">{v:.1f}</span>'
 
+        def _rank_cell(rank):
+            lbl, col, _ = iv_rank_tier(rank)
+            return f'<span style="color:{col}">{rank:.0f}/100 {lbl}</span>'
+
         rows = "".join(
             f'<tr>'
             f'<td style="padding:6px 10px;font-weight:bold">{r["ticker"]}</td>'
@@ -445,7 +502,7 @@ def build_email_html(signals, all_valid, mcap_map, run_date):
             + " / ".join(_rsi_cell(v) for v in r.get("rsi_days", [r["rsi"], None, None]))
             + f'</td>'
             f'<td style="padding:6px 10px">${r["price"]:,.2f}</td>'
-            f'<td style="padding:6px 10px">{r["iv_rank"]:.0f}/100</td>'
+            f'<td style="padding:6px 10px">{_rank_cell(r["iv_rank"])}</td>'
             f'<td style="padding:6px 10px">${mcap_map.get(r["ticker"],0)/1e9:.0f}B</td>'
             f'</tr>'
             for r in near
@@ -513,12 +570,15 @@ def main():
     print(f"  RESULTS: {len(signals)} signal(s) with RSI < {RSI_THRESHOLD} out of {len(valid)} scanned")
     print(bar)
     for r in sorted(signals, key=lambda x: x['rsi']):
-        rsi_str = ' / '.join(f'{v:.1f}' if v is not None else '—' for v in r['rsi_days'])
+        rsi_str   = ' / '.join(f'{v:.1f}' if v is not None else '—' for v in r['rsi_days'])
+        tier, _, guidance = iv_rank_tier(r['iv_rank'])
         print(f"  {r['ticker']:<6}  RSI(last {RSI_LOOKBACK}d)=[{rsi_str}]  "
-              f"Price=${r['price']:,.2f}  IV Rank={r['iv_rank']:.0f}/100")
+              f"Price=${r['price']:,.2f}  IV Rank={r['iv_rank']:.0f}/100 [{tier}]")
+        print(f"           IV guidance: {guidance}")
+        print(f"           IV scale: <20 IDEAL BUY · 20-40 GOOD · 40-60 FAIR · 60-80 ABOVE AVG · >80 EXPENSIVE")
         if r.get('leaps_strike'):
             print(f"           LEAPS: ${r['leaps_strike']:.0f} Call ({r['leaps_exp']})  "
-                  f"IV={r['leaps_iv']:.0f}%  Rank={r['iv_rank']:.0f}  "
+                  f"IV={r['leaps_iv']:.0f}%  Rank={r['iv_rank']:.0f} [{tier}]  "
                   f"Prem=${r['leaps_prem']:.2f}  BE={r['leaps_be_pct']:+.1f}%")
 
     # Save CSV
