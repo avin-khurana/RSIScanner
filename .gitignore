@@ -5,4 +5,5 @@ __pycache__/
 venv/
 .env
 *.csv
+!my_trades.csv
 *.html

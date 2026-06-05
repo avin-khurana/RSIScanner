@@ -10,8 +10,12 @@ Scans the top 40 large-cap US stocks (market cap > $100B) for RSI(14) oversold c
 4. **Real IV** — back-solves implied volatility from the live bid/ask mid via Newton-Raphson (Black-Scholes inversion) rather than trusting Yahoo Finance's pre-computed `impliedVolatility` field, which is stale (computed from last trade) and often NaN or 0 for deep ITM LEAPS.
 5. **IV Rank** — compares current 30-day realized vol against its 52-week range and labels it with a tiered buy guidance.
 6. **Vega-gain estimate** — shows the estimated % option gain if IV reverts from its current level back to the 52-week average (useful for spotting depressed-IV setups).
-7. **Near-misses watch list** — the email also includes a table of stocks with RSI 30–35 (not yet oversold, but worth monitoring).
-8. **Email report** — sends a rich HTML summary to a configured address, including per-ticker signal cards with greeks (Δ, Θ, Vega) and the near-misses table.
+7. **Trade management levels** — for each signal, back-solves and prints:
+   - **Stock target** (▲): the stock price at which the LEAPS call gains +50%, computed via Black-Scholes binary search (accounts for delta, gamma, and remaining theta).
+   - **Stock stop** (▼): entry stock × 0.90 — a consistent 10% stock-level stop that gives every position the same breathing room regardless of option premium size.
+   - A ready-to-paste CSV row for the trade tracker.
+8. **Near-misses watch list** — the email also includes a table of stocks with RSI 30–35 (not yet oversold, but worth monitoring).
+9. **Email report** — sends a rich HTML summary to a configured address, including per-ticker signal cards with greeks (Δ, Θ, Vega), target/stop levels, and the near-misses table.
 
 ## IV Rank tiers
 
@@ -79,9 +83,58 @@ WMT    RSI(last 3d)=[29.1 / 33.0 / 32.0]  Price=$115.86  IV Rank=96/100 [EXPENSI
        IV guidance: IV near 52-wk high — poor time to buy naked options
        IV scale: <20 IDEAL BUY · 20-40 GOOD · 40-60 FAIR · 60-80 ABOVE AVG · >80 EXPENSIVE
        LEAPS: $105 Call (2027-06-17)  IV=27%  Rank=96 [EXPENSIVE]  Prem=$21.35  BE=+9.1%
+       Target : stock ≥ $128.40 (+10.8%)  →  option +50% ($32.03)
+       Stop   : stock ≤ $104.27 (−10.0%)  →  10% stock-level stop
+       ┌─ Paste into my_trades.csv ───────────────────────────────────
+       │ WMT,2026-06-05,115.86,105,C,2027-06-17,21.35,128.40,104.27,32.03,31,OPEN,,,,,
+       └──────────────────────────────────────────────────────────────
 ```
 
-The HTML email adds per-ticker greeks (Δ, Θ/day, Vega/1%IV), the IV 52-week range (low → avg → high), an estimated vega-gain if IV reverts to average, and a near-misses table (RSI 30–35) for stocks approaching the oversold threshold.
+The HTML email adds per-ticker greeks (Δ, Θ/day, Vega/1%IV), the IV 52-week range (low → avg → high), vega-gain estimate, and a Target ▲ / Stop ▼ row with the back-solved stock price levels. Near-misses table (RSI 30–35) is also included.
+
+## Trade Tracker
+
+`trade_tracker.py` monitors your open LEAPS positions against live stock prices and sends alerts when a target or stop is crossed.
+
+### Workflow
+
+1. Run the scanner — it prints a ready-to-paste CSV row for each signal.
+2. Add your **actual fills** to `my_trades.csv` (copy the row, adjust entry prices to match your broker).
+3. Run the tracker to check status:
+
+```bash
+python trade_tracker.py           # check all positions, fire alerts if target/stop hit
+python trade_tracker.py --report  # save trade_report.html and open it
+python trade_tracker.py --summary # print table only, no alerts
+```
+
+4. When you close a trade, set `status=WIN` or `status=LOSS` and fill in the exit columns.
+5. `git add my_trades.csv && git commit` to version-control your trade log.
+
+### Alerts
+
+- **macOS desktop notification** — pops immediately when target or stop is crossed.
+- **Email** — sends a formatted alert card to your configured `EMAIL_TO`.
+- No duplicate alerts: re-running the tracker after an alert does not resend.
+
+### my_trades.csv columns
+
+| Column | Description |
+|--------|-------------|
+| `ticker` | Stock symbol |
+| `entry_date` | Date you entered (YYYY-MM-DD) |
+| `entry_stock` | Your actual fill price on the stock |
+| `strike` | Option strike |
+| `option_type` | C or P |
+| `expiry` | Option expiry (YYYY-MM-DD) |
+| `entry_option` | Premium you actually paid per share |
+| `target_stock` | Stock price for +50% option gain (from scanner) |
+| `stop_stock` | 10% below entry stock (from scanner) |
+| `target_option` | Option price at +50% gain |
+| `sigma_pct` | IV% at entry — used for live BS repricing |
+| `status` | OPEN / WIN / LOSS |
+| `exit_date / exit_stock / exit_option / pnl_pct` | Fill when closing |
+| `notes` | Anything worth remembering |
 
 ## Automated runs
 

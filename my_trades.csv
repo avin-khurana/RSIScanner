@@ -1,0 +1,30 @@
+ticker,entry_date,entry_stock,strike,option_type,expiry,entry_option,target_stock,stop_stock,target_option,sigma_pct,status,exit_date,exit_stock,exit_option,pnl_pct,notes
+# HOW TO USE:
+# 1. Run rsi_scanner.py — it prints a ready-to-paste CSV row for each signal
+# 2. Copy that row here, remove the leading "│ " characters
+# 3. Fill in your ACTUAL fills (entry_stock, entry_option) from your broker
+# 4. Run: python trade_tracker.py          — check status + alerts
+# 5. When you close a trade: set status=WIN or LOSS, fill exit_date/exit_stock/exit_option/pnl_pct
+# 6. git add my_trades.csv && git commit -m "update trades"
+#
+# COLUMNS:
+#   ticker        — stock symbol (e.g. NVDA)
+#   entry_date    — date you entered (YYYY-MM-DD)
+#   entry_stock   — stock price at your actual fill
+#   strike        — option strike price
+#   option_type   — C (call) or P (put)
+#   expiry        — option expiry date (YYYY-MM-DD)
+#   entry_option  — option premium you actually paid per share
+#   target_stock  — stock price where option gains +50% (from scanner)
+#   stop_stock    — stock price 10% below entry_stock (from scanner)
+#   target_option — option price at +50% gain (from scanner)
+#   sigma_pct     — IV% used for repricing (from scanner, e.g. 25)
+#   status        — OPEN / WIN / LOSS
+#   exit_date     — date closed (leave blank if open)
+#   exit_stock    — stock price at exit (leave blank if open)
+#   exit_option   — option price at exit (leave blank if open)
+#   pnl_pct       — realized P&L % on option (leave blank if open)
+#   notes         — anything you want to remember about this trade
+#
+# EXAMPLE ROW (delete this line and paste real data):
+# NVDA,2026-04-04,94.18,85,C,2027-01-17,29.55,115.30,84.76,44.33,66,OPEN,,,,,Tariff panic dip

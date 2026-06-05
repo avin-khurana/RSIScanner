@@ -152,6 +152,25 @@ def iv_rank_tier(rank):
         return "ABOVE AVG",   "#e3a341", "IV above average — consider spreads over naked longs"
     return     "EXPENSIVE",   "#f85149", "IV near 52-wk high — poor time to buy naked options"
 
+def stock_target_for_option_gain(S, K, T, r, sigma, entry_price, gain_pct=0.50):
+    """Binary search: stock price where the LEAPS call is worth entry_price × (1 + gain_pct).
+    Accounts for delta, gamma, and remaining theta — more accurate than delta-only estimate."""
+    if T <= 0 or sigma <= 0 or entry_price <= 0:
+        return round(S * (1 + gain_pct / max(TARGET_DELTA, 0.5)), 2)
+    target_option = entry_price * (1 + gain_pct)
+    lo, hi = S, S * 5.0
+    for _ in range(80):
+        mid = (lo + hi) / 2
+        g = bs_greeks(mid, K, T, r, sigma)
+        if g is None:
+            break
+        if g['price'] < target_option:
+            lo = mid
+        else:
+            hi = mid
+    return round(mid, 2)
+
+
 def implied_vol(S, K, T, r, market_price, max_iter=100, tol=1e-6):
     """Newton-Raphson IV solver: finds sigma such that BS_call(sigma) == market_price."""
     if market_price <= 0 or T <= 0 or S <= 0 or K <= 0:
@@ -300,18 +319,29 @@ def scan_ticker(ticker, mcap):
                 iv_delta_pts   = max(0.0, iv_avg - chain_iv * 100)
                 iv_expand_gain = round(greeks['vega'] * iv_delta_pts / prem * 100, 1)
 
+            # Trade management levels (stock-level stop + BS back-solved stock target)
+            leaps_target_option = round(prem * 1.50, 2)
+            leaps_stop_stock    = round(price * 0.90, 2)
+            leaps_target_stock  = stock_target_for_option_gain(
+                price, strike, T or 1.0, RISK_FREE_RATE, chain_iv, prem
+            )
+
             result.update(dict(
-                leaps_exp      = exp_date,
-                leaps_days     = round((T or 0) * 365),
-                leaps_strike   = round(strike, 0),
-                leaps_iv       = round(chain_iv * 100, 1),
-                leaps_prem     = round(prem, 2),
-                leaps_delta    = round(greeks['delta'], 2) if greeks else None,
-                leaps_theta    = round(greeks['theta'], 2) if greeks else None,
-                leaps_vega     = round(greeks['vega'],  2) if greeks else None,
-                leaps_be       = round(strike + prem, 2),
-                leaps_be_pct   = round((strike + prem) / price * 100 - 100, 1),
-                iv_expand_gain = iv_expand_gain,
+                leaps_exp           = exp_date,
+                leaps_days          = round((T or 0) * 365),
+                leaps_strike        = round(strike, 0),
+                leaps_iv            = round(chain_iv * 100, 1),
+                leaps_entry_sigma   = round(chain_iv * 100, 1),
+                leaps_prem          = round(prem, 2),
+                leaps_delta         = round(greeks['delta'], 2) if greeks else None,
+                leaps_theta         = round(greeks['theta'], 2) if greeks else None,
+                leaps_vega          = round(greeks['vega'],  2) if greeks else None,
+                leaps_be            = round(strike + prem, 2),
+                leaps_be_pct        = round((strike + prem) / price * 100 - 100, 1),
+                iv_expand_gain      = iv_expand_gain,
+                leaps_target_option = leaps_target_option,
+                leaps_stop_stock    = leaps_stop_stock,
+                leaps_target_stock  = leaps_target_stock,
             ))
 
     except Exception as e:
@@ -430,6 +460,19 @@ def build_email_html(signals, all_valid, mcap_map, run_date):
       <td style="padding:4px 0">
         ${r['leaps_be']:,.2f}
         &nbsp;<span style="color:#d29922">({r['leaps_be_pct']:+.1f}% above today)</span>
+      </td>
+    </tr>
+    <tr>
+      <td style="color:#8b949e;padding:4px 0;vertical-align:top">Target&nbsp;/&nbsp;Stop</td>
+      <td style="padding:4px 0">
+        <b style="color:#3fb950">▲ ${r['leaps_target_stock']:,.2f}
+        ({(r['leaps_target_stock']/r['price']-1)*100:+.1f}%)</b>
+        <span style="color:#8b949e;font-size:11px"> → option ${r['leaps_target_option']:.2f} (+50%)</span>
+        &nbsp;&nbsp;
+        <b style="color:#f85149">▼ ${r['leaps_stop_stock']:,.2f} (−10%)</b>
+        <br><span style="color:#8b949e;font-size:10px;font-style:italic">
+          BS back-solved stock target · 10% stock-level stop
+        </span>
       </td>
     </tr>
   </table>
@@ -580,6 +623,20 @@ def main():
             print(f"           LEAPS: ${r['leaps_strike']:.0f} Call ({r['leaps_exp']})  "
                   f"IV={r['leaps_iv']:.0f}%  Rank={r['iv_rank']:.0f} [{tier}]  "
                   f"Prem=${r['leaps_prem']:.2f}  BE={r['leaps_be_pct']:+.1f}%")
+            if r.get('leaps_target_stock'):
+                tgt_pct = (r['leaps_target_stock'] / r['price'] - 1) * 100
+                print(f"           Target : stock ≥ ${r['leaps_target_stock']:,.2f} ({tgt_pct:+.1f}%)"
+                      f"  →  option +50% (${r['leaps_target_option']:.2f})")
+                print(f"           Stop   : stock ≤ ${r['leaps_stop_stock']:,.2f} (−10.0%)"
+                      f"  →  10% stock-level stop")
+                today_str = datetime.now().strftime('%Y-%m-%d')
+                print(f"           ┌─ Paste into my_trades.csv ───────────────────────────────────")
+                print(f"           │ {r['ticker']},{today_str},{r['price']:.2f},"
+                      f"{r['leaps_strike']:.0f},C,{r['leaps_exp']},"
+                      f"{r['leaps_prem']:.2f},{r['leaps_target_stock']:.2f},"
+                      f"{r['leaps_stop_stock']:.2f},{r['leaps_target_option']:.2f},"
+                      f"{r['leaps_entry_sigma']},OPEN,,,,,")
+                print(f"           └──────────────────────────────────────────────────────────────")
 
     # Save CSV
     csv_path = 'rsi_scan_results.csv'
