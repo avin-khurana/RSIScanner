@@ -9,7 +9,9 @@ Scans the top 40 large-cap US stocks (market cap > $100B) for RSI(14) oversold c
 3. **LEAPS contract** — finds the nearest expiry ≥ 360 days out, selects the ITM call closest to Δ = 0.70.
 4. **Real IV** — back-solves implied volatility from the live bid/ask mid via Newton-Raphson (Black-Scholes inversion) rather than trusting Yahoo Finance's pre-computed `impliedVolatility` field, which is stale (computed from last trade) and often NaN or 0 for deep ITM LEAPS.
 5. **IV Rank** — compares current 30-day realized vol against its 52-week range and labels it with a tiered buy guidance.
-6. **Email report** — sends a rich HTML summary to a configured address.
+6. **Vega-gain estimate** — shows the estimated % option gain if IV reverts from its current level back to the 52-week average (useful for spotting depressed-IV setups).
+7. **Near-misses watch list** — the email also includes a table of stocks with RSI 30–35 (not yet oversold, but worth monitoring).
+8. **Email report** — sends a rich HTML summary to a configured address, including per-ticker signal cards with greeks (Δ, Θ, Vega) and the near-misses table.
 
 ## IV Rank tiers
 
@@ -42,7 +44,7 @@ Environment variables for email (optional — script prints results to stdout re
 ```bash
 export EMAIL_FROM="you@gmail.com"
 export EMAIL_APP_PASSWORD="your-app-password"
-export EMAIL_TO="you@gmail.com"          # defaults to the address above
+export EMAIL_TO="you@gmail.com"          # optional; defaults to avin.khurana18@gmail.com if unset
 ```
 
 ## Usage
@@ -73,11 +75,13 @@ Uses Wilder's smoothing (`EMA with com = period - 1`) to match TradingView's RSI
 ## Output example
 
 ```
-WMT    RSI=[29.1 / 33.0 / 32.0]  Price=$115.86  IV Rank=96/100 [EXPENSIVE]
+WMT    RSI(last 3d)=[29.1 / 33.0 / 32.0]  Price=$115.86  IV Rank=96/100 [EXPENSIVE]
        IV guidance: IV near 52-wk high — poor time to buy naked options
        IV scale: <20 IDEAL BUY · 20-40 GOOD · 40-60 FAIR · 60-80 ABOVE AVG · >80 EXPENSIVE
        LEAPS: $105 Call (2027-06-17)  IV=27%  Rank=96 [EXPENSIVE]  Prem=$21.35  BE=+9.1%
 ```
+
+The HTML email adds per-ticker greeks (Δ, Θ/day, Vega/1%IV), the IV 52-week range (low → avg → high), an estimated vega-gain if IV reverts to average, and a near-misses table (RSI 30–35) for stocks approaching the oversold threshold.
 
 ## Automated runs
 
