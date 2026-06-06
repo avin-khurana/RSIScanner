@@ -24,6 +24,7 @@ Usage:
 
 import os
 import smtplib
+import resource
 import warnings
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
@@ -111,7 +112,7 @@ def get_large_cap_universe():
         except Exception:
             return ticker, 0.0
 
-    with ThreadPoolExecutor(max_workers=20) as ex:
+    with ThreadPoolExecutor(max_workers=8) as ex:
         pairs = list(ex.map(fetch_mcap, candidates))
 
     pairs = [(t, mc) for t, mc in pairs if mc > MIN_MARKET_CAP]
@@ -797,6 +798,14 @@ def main():
     parser.add_argument('--no-email', action='store_true', help='Skip email/telegram alerts')
     args = parser.parse_args()
 
+    # Raise OS file-descriptor limit — 40 tickers × ~5 yfinance calls each can
+    # exhaust the macOS default of 256. Request 4096; silently ignore if denied.
+    try:
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        resource.setrlimit(resource.RLIMIT_NOFILE, (min(hard, 4096), hard))
+    except Exception:
+        pass
+
     run_date = datetime.now().strftime('%Y-%m-%d %H:%M')
     print(f'\n{BAR}')
     print(f'  LEAPS UNIFIED SCANNER  —  {run_date}')
@@ -879,10 +888,14 @@ def main():
 
     # ── Save CSV ──
     csv_path = 'leaps_scan_results.csv'
-    pd.DataFrame([{k: v for k, v in r.items()
-                   if k not in ('mom_cond', 'fund_details', 's3', 'rsi_days')}
-                  for r in valid]).to_csv(csv_path, index=False)
-    print(f'\n  Saved → {csv_path}')
+    try:
+        rows = [{k: v for k, v in r.items()
+                 if k not in ('mom_cond', 'fund_details', 's3', 'rsi_days')}
+                for r in valid]
+        pd.DataFrame(rows).to_csv(csv_path, index=False)
+        print(f'\n  Saved → {csv_path}')
+    except OSError as e:
+        print(f'\n  CSV save failed ({e}) — try: ulimit -n 4096')
 
     # ── Alerts ──
     if not args.no_email:
@@ -896,16 +909,25 @@ def main():
             f'LEAPS Scanner {run_date} — No signals today (VIX={vix:.1f})'
         )
         html = build_email_html(oversold, momentum, near_oversold, near_mom, vix, run_date)
-        with open('leaps_scan.html', 'w') as f:
-            f.write(html)
-        print('  Saved → leaps_scan.html')
+        try:
+            with open('leaps_scan.html', 'w') as f:
+                f.write(html)
+            print('  Saved → leaps_scan.html')
+        except OSError as e:
+            print(f'  HTML save failed ({e})')
+
+        def _mom_tag(r):
+            if r.get('momentum_strong'): return 'STRONG'
+            if r.get('momentum_combo'):  return 'COMBO'
+            return 'TECH'
+
         tg_lines = [f'<b>LEAPS Scanner {run_date}</b>  VIX={vix:.1f} [{regime}]']
         if oversold:
-            tg_lines.append(f'\n🔴 <b>Oversold ({len(oversold)})</b>: ' +
+            tg_lines.append('\n🔴 <b>Oversold (' + str(len(oversold)) + ')</b>: ' +
                             ', '.join(f'{r["ticker"]}(RSI={r["rsi"]:.0f})' for r in oversold))
         if momentum:
-            tg_lines.append(f'\n🟢 <b>Momentum ({len(momentum)})</b>: ' +
-                            ', '.join(f'{r["ticker"]}({("STRONG" if r["momentum_strong"] else "COMBO") if r["momentum_combo"] else "TECH"})' for r in momentum))
+            tg_lines.append('\n🟢 <b>Momentum (' + str(len(momentum)) + ')</b>: ' +
+                            ', '.join(f'{r["ticker"]}({_mom_tag(r)})' for r in momentum))
         if not oversold and not momentum:
             tg_lines.append('\nNo signals today.')
         send_telegram('\n'.join(tg_lines))
